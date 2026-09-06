@@ -1,0 +1,36 @@
+FROM jenkins/jenkins:lts
+
+USER root
+
+# Install Python 3 and dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    git \
+    curl \
+    ca-certificates \
+    lsb-release \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Azure CLI
+RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# Install Docker CLI (for building images in Jenkins)
+RUN apt-get update && \
+    apt-get install -y docker.io && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create symbolic link for python command
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
+# Pre-install essential Jenkins plugins for this pipeline
+RUN jenkins-plugin-cli --plugins "git workflow-aggregator junit github-branch-source"
+
+# Configure git to allow all directories (fixes dubious ownership errors in Jenkins)
+RUN git config --system --add safe.directory '*'
+
+# Switch back to jenkins user
+USER jenkins

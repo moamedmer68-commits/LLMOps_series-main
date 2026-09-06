@@ -1,0 +1,141 @@
+/*
+ * LLMOps Test-Only Pipeline
+ * 
+ * This pipeline runs tests on every push without requiring Azure credentials.
+ * 
+ * Pipeline stages:
+ * - Checkout code from Git
+ * - Setup Python environment
+ * - Install dependencies
+ * - Run tests with coverage
+ */
+
+pipeline {
+    agent any
+    
+    environment {
+        // Python settings
+        PYTHON_VERSION = '3.12'
+        PYTHONPATH = "${WORKSPACE}:${WORKSPACE}/multi_doc_chat"
+        
+        // API Keys for testing (optional - set in Jenkins if needed)
+        GROQ_API_KEY = "${env.GROQ_API_KEY ?: ''}"
+        GOOGLE_API_KEY = "${env.GOOGLE_API_KEY ?: ''}"
+        LLM_PROVIDER = "${env.LLM_PROVIDER ?: 'groq'}"
+    }
+    
+    triggers {
+        // Poll SCM approximately every minutes (no GitHub webhook/tunnel needed)
+        pollSCM('* * * * *')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo '📦 Checking out code from repository...'
+                checkout scm
+            }
+        }
+        
+        stage('Setup Python Environment') {
+            steps {
+                echo '🐍 Setting up Python virtual environment...'
+                sh '''
+                    set -e
+                    
+                    # Install uv (fast Python package/dependency manager)
+                    curl -LsSf https://astral.sh/uv/install.sh | sh
+                    UV="$HOME/.local/bin/uv"
+
+                    # Avoid Azure Files limitations by storing uv data outside Jenkins HOME
+                    export UV_PYTHON_INSTALL_DIR=/tmp/uv/python
+                    export XDG_DATA_HOME=/tmp/.local/share
+                    export XDG_CACHE_HOME=/tmp/.cache
+                    
+                    # Ensure exact Python version matches project (e.g., 3.12)
+                    "$UV" python install ${PYTHON_VERSION}
+                    
+                    # Create venv with the requested Python version
+                    "$UV" venv --python ${PYTHON_VERSION} /tmp/venv-${BUILD_NUMBER}
+                    
+                    # Show versions for debugging
+                    /tmp/venv-${BUILD_NUMBER}/bin/python --version
+                    "$UV" --version
+                '''
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                echo '📥 Installing project dependencies...'
+                sh '''
+                    set -e
+                    VENV_PY="/tmp/venv-${BUILD_NUMBER}/bin/python"
+                    UV="$HOME/.local/bin/uv"
+
+                    # Ensure uv also uses temp storage during dependency resolution
+                    export XDG_DATA_HOME=/tmp/.local/share
+                    export XDG_CACHE_HOME=/tmp/.cache
+                    
+                    # Create a sanitized requirements file removing local-only and OS-specific deps
+                    SAN_REQ=$(mktemp)
+                    cat requirements.txt \
+                      | sed -E '/^[[:space:]]*llmops-series(==.*)?[[:space:]]*$/d' \
+                      | sed -E '/^[[:space:]]*pywin32(==.*)?[[:space:]]*$/d' \
+                      > "$SAN_REQ"
+                    
+                    # Install third-party dependencies with uv into the venv interpreter
+                    "$UV" pip install --python "$VENV_PY" -r "$SAN_REQ"
+                    
+                    # Ensure test tooling is available
+                    "$UV" pip install --python "$VENV_PY" pytest pytest-cov
+                    
+                    # Skip editable install; rely on PYTHONPATH set at pipeline level
+                    echo "Using PYTHONPATH=${PYTHONPATH} for local package imports"
+                '''
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                echo '🧪 Running pytest tests...'
+                sh '''
+                    set -e
+                    . /tmp/venv-${BUILD_NUMBER}/bin/activate
+                    mkdir -p test-results
+                    pytest tests/ \
+                        --verbose \
+                        --junit-xml=test-results/results.xml \
+                        --cov=multi_doc_chat \
+                        --cov-report=xml:coverage.xml \
+                        --cov-report=html:htmlcov \
+                        --cov-report=term \
+                        || true
+                '''
+                
+                // Archive test results and coverage reports immediately
+                echo '📊 Archiving test results...'
+                junit allowEmptyResults: true, testResults: 'test-results/*.xml'
+                archiveArtifacts artifacts: 'coverage.xml,htmlcov/**,test-results/**/*.xml', allowEmptyArchive: true
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '✅ Pipeline completed successfully! 🎉'
+            echo '📊 Test results and coverage reports have been archived.'
+        }
+        
+        failure {
+            echo '❌ Pipeline failed!'
+            echo 'Check the console output above for error details.'
+        }
+        
+        always {
+            echo '🧹 Cleaning up virtual environment...'
+            sh 'rm -rf /tmp/venv-${BUILD_NUMBER} || true'
+            echo '💡 Pipeline execution finished.'
+        }
+    }
+}
