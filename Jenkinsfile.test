@@ -1,31 +1,32 @@
 /*
- * LLMOps Test-Only Pipeline
+ * LLMOps Test-Only Pipeline (Windows Version)
  * 
  * This pipeline runs tests on every push without requiring Azure credentials.
- * 
- * Pipeline stages:
- * - Checkout code from Git
- * - Setup Python environment
- * - Install dependencies
- * - Run tests with coverage
+ * Fully adapted for Windows Jenkins nodes.
  */
 
 pipeline {
     agent any
     
     environment {
-        // Python settings
+        // Python settings - Using semicolon for Windows paths
         PYTHON_VERSION = '3.12'
-        PYTHONPATH = "${WORKSPACE}:${WORKSPACE}/multi_doc_chat"
+        PYTHONPATH = "${WORKSPACE};${WORKSPACE}\\multi_doc_chat"
         
-        // API Keys for testing (optional - set in Jenkins if needed)
+        // API Keys (Will be injected by Jenkins Credentials if configured)
         GROQ_API_KEY = "${env.GROQ_API_KEY ?: ''}"
         GOOGLE_API_KEY = "${env.GOOGLE_API_KEY ?: ''}"
         LLM_PROVIDER = "${env.LLM_PROVIDER ?: 'groq'}"
+        
+        // LangSmith Integration for Jenkins
+        LANGSMITH_API_KEY = "${env.LANGSMITH_API_KEY ?: ''}"
+        LANGCHAIN_TRACING_V2 = "true"
+        LANGSMITH_ENDPOINT = "https://api.smith.langchain.com"
+        LANGSMITH_PROJECT = "LLMOps_series-main"
     }
     
     triggers {
-        // Poll SCM approximately every minutes (no GitHub webhook/tunnel needed)
+        // Poll SCM approximately every minute
         pollSCM('* * * * *')
     }
     
@@ -39,28 +40,20 @@ pipeline {
         
         stage('Setup Python Environment') {
             steps {
-                echo '🐍 Setting up Python virtual environment...'
-                sh '''
-                    set -e
+                echo '🐍 Setting up Python virtual environment (Windows)...'
+                bat '''
+                    @echo off
+                    :: Create a virtual environment inside the Jenkins workspace
+                    python -m venv venv
                     
-                    # Install uv (fast Python package/dependency manager)
-                    curl -LsSf https://astral.sh/uv/install.sh | sh
-                    UV="$HOME/.local/bin/uv"
-
-                    # Avoid Azure Files limitations by storing uv data outside Jenkins HOME
-                    export UV_PYTHON_INSTALL_DIR=/tmp/uv/python
-                    export XDG_DATA_HOME=/tmp/.local/share
-                    export XDG_CACHE_HOME=/tmp/.cache
+                    :: Activate and prepare pip & uv
+                    call venv\\Scripts\\activate.bat
+                    python -m pip install --upgrade pip
+                    pip install uv
                     
-                    # Ensure exact Python version matches project (e.g., 3.12)
-                    "$UV" python install ${PYTHON_VERSION}
-                    
-                    # Create venv with the requested Python version
-                    "$UV" venv --python ${PYTHON_VERSION} /tmp/venv-${BUILD_NUMBER}
-                    
-                    # Show versions for debugging
-                    /tmp/venv-${BUILD_NUMBER}/bin/python --version
-                    "$UV" --version
+                    :: Show versions for debugging
+                    python --version
+                    uv --version
                 '''
             }
         }
@@ -68,30 +61,20 @@ pipeline {
         stage('Install Dependencies') {
             steps {
                 echo '📥 Installing project dependencies...'
-                sh '''
-                    set -e
-                    VENV_PY="/tmp/venv-${BUILD_NUMBER}/bin/python"
-                    UV="$HOME/.local/bin/uv"
-
-                    # Ensure uv also uses temp storage during dependency resolution
-                    export XDG_DATA_HOME=/tmp/.local/share
-                    export XDG_CACHE_HOME=/tmp/.cache
+                bat '''
+                    @echo off
+                    call venv\\Scripts\\activate.bat
                     
-                    # Create a sanitized requirements file removing local-only and OS-specific deps
-                    SAN_REQ=$(mktemp)
-                    cat requirements.txt \
-                      | sed -E '/^[[:space:]]*llmops-series(==.*)?[[:space:]]*$/d' \
-                      | sed -E '/^[[:space:]]*pywin32(==.*)?[[:space:]]*$/d' \
-                      > "$SAN_REQ"
+                    :: Sanitize requirements using inline Python (Alternative to Linux sed)
+                    python -c "import re; lines = open('requirements.txt', encoding='utf-8').read().splitlines(); clean = [l for l in lines if not re.match(r'^[ \\t]*(llmops-series|pywin32)(==.*)?$', l)]; open('requirements_clean.txt', 'w', encoding='utf-8').write('\\n'.join(clean))"
                     
-                    # Install third-party dependencies with uv into the venv interpreter
-                    "$UV" pip install --python "$VENV_PY" -r "$SAN_REQ"
+                    :: Install dependencies using uv for maximum speed
+                    uv pip install -r requirements_clean.txt
                     
-                    # Ensure test tooling is available
-                    "$UV" pip install --python "$VENV_PY" pytest pytest-cov
+                    :: Ensure test tooling is available
+                    uv pip install pytest pytest-cov
                     
-                    # Skip editable install; rely on PYTHONPATH set at pipeline level
-                    echo "Using PYTHONPATH=${PYTHONPATH} for local package imports"
+                    echo Using PYTHONPATH=%PYTHONPATH% for local package imports
                 '''
             }
         }
@@ -99,21 +82,24 @@ pipeline {
         stage('Run Tests') {
             steps {
                 echo '🧪 Running pytest tests...'
-                sh '''
-                    set -e
-                    . /tmp/venv-${BUILD_NUMBER}/bin/activate
-                    mkdir -p test-results
-                    pytest tests/ \
-                        --verbose \
-                        --junit-xml=test-results/results.xml \
-                        --cov=multi_doc_chat \
-                        --cov-report=xml:coverage.xml \
-                        --cov-report=html:htmlcov \
-                        --cov-report=term \
-                        || true
-                '''
+                // catchError ensures test results are archived even if tests fail
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    bat '''
+                        @echo off
+                        call venv\\Scripts\\activate.bat
+                        if not exist test-results mkdir test-results
+                        
+                        :: Use caret (^) for multiline commands in Windows Batch
+                        pytest tests/ ^
+                            --verbose ^
+                            --junit-xml=test-results/results.xml ^
+                            --cov=multi_doc_chat ^
+                            --cov-report=xml:coverage.xml ^
+                            --cov-report=html:htmlcov ^
+                            --cov-report=term
+                    '''
+                }
                 
-                // Archive test results and coverage reports immediately
                 echo '📊 Archiving test results...'
                 junit allowEmptyResults: true, testResults: 'test-results/*.xml'
                 archiveArtifacts artifacts: 'coverage.xml,htmlcov/**,test-results/**/*.xml', allowEmptyArchive: true
@@ -134,7 +120,11 @@ pipeline {
         
         always {
             echo '🧹 Cleaning up virtual environment...'
-            sh 'rm -rf /tmp/venv-${BUILD_NUMBER} || true'
+            bat '''
+                @echo off
+                if exist venv rmdir /s /q venv
+                if exist requirements_clean.txt del requirements_clean.txt
+            '''
             echo '💡 Pipeline execution finished.'
         }
     }
