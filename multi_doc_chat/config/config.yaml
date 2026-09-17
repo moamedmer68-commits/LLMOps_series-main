@@ -1,6 +1,6 @@
 embedding_model:
   provider: "google"
-  model_name: "models/text-embedding-004"
+  model_name: "gemini-embedding-001"
 
 retriever:
   top_k: 10
@@ -18,6 +18,6 @@ llm:
 
   google:
     provider: "google"
-    model_name: "gemini-2.0-flash"
+    model_name: "gemini-3.6-flashpython test.py"
     temperature: 0
     max_output_tokens: 2048
